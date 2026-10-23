@@ -1,0 +1,319 @@
+name: Firmware Build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ImmortalWrt (rockchip/armv8 · Lunzn FastRhino R66S) + lucky + bandix
+#
+# 触发：
+#   · schedule          每日轮询三处上游版本，指纹不变则直接跳过（不耗构建额度）
+#   · workflow_dispatch 手动触发，可强制重建、可临时改包清单
+#
+# 产物：Release（tag = 版本指纹），内含 sysupgrade 镜像 + 6 个自定义 apk
+# 刷机：路由器上执行 fwupdate
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: "0 18 * * *"        # UTC 18:00 = 北京时间 02:00
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "忽略已有 Release，强制重建"
+        type: boolean
+        default: false
+      extra_packages:
+        description: "额外包（空格分隔；留空用仓库内默认清单）"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firmware-build
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  IW_TARGET: rockchip/armv8
+  PROFILE: lunzn_fastrhino-r66s
+  ARCH_PKGS: aarch64_generic
+  ROOTFS_PARTSIZE: "4096"        # 必须与现网分区一致（4 GB），否则 sysupgrade 会整盘重写
+
+  LUCKY_FEED: https://github.com/gdy666/luci-app-lucky.git;main
+  BANDIX_BACKEND: timsaya/openwrt-bandix
+  BANDIX_FRONTEND: timsaya/luci-app-bandix
+
+  # 自定义三件套（除 lucky 外均由上游直接提供 .apk）
+  CUSTOM_PKGS: bandix luci-app-bandix luci-i18n-bandix-zh-cn lucky luci-app-lucky luci-i18n-lucky-zh-cn
+
+  # 额外打进镜像的官方包（已用 ImmortalWrt 构建服务器校验过名字全部存在）
+  DEFAULT_EXTRA: >-
+    luci-app-openclash luci-theme-argon luci-app-argon-config luci-i18n-argon-config-zh-cn
+    luci-app-cpufreq luci-i18n-cpufreq-zh-cn luci-i18n-base-zh-cn
+    luci-app-package-manager luci-i18n-package-manager-zh-cn luci-app-commands
+    luci-compat luci-lib-jsonc luci-lib-nixio luci-lib-ip luci-lua-runtime
+    bash curl conntrack iw zoneinfo-all unzip usign
+    block-mount automount kmod-usb-storage kmod-fs-ext4 kmod-fs-vfat
+    kmod-fs-exfat kmod-fs-ntfs3 openssh-sftp-server ip-full fdisk
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ───────────────────────────────────────────────── 1. 版本指纹 / 去重
+      - name: Resolve upstream versions
+        id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          IW=$(curl -fsSL --retry 3 https://downloads.immortalwrt.org/.versions.json | jq -r '.stable_version // .stable // empty')
+          [ -n "$IW" ] || { echo "::error::取不到 ImmortalWrt 稳定版号"; exit 1; }
+
+          # lucky 以「feed Makefile 的 PKG_VERSION」为准：core 发版后 feed 未必立刻跟进
+          LUCKY=$(curl -fsSL --retry 3 "https://raw.githubusercontent.com/gdy666/luci-app-lucky/main/lucky/Makefile" \
+                  | sed -n 's/^PKG_VERSION:=//p' | head -1 | tr -d ' \r')
+          [ -n "$LUCKY" ] || { echo "::error::取不到 lucky PKG_VERSION"; exit 1; }
+
+          BANDIX_TAG=$(gh api "repos/${BANDIX_BACKEND}/releases/latest" --jq .tag_name)
+          FRONT_TAG=$(gh api "repos/${BANDIX_FRONTEND}/releases/latest" --jq .tag_name)
+          BANDIX=${BANDIX_TAG#v}
+          FRONT=${FRONT_TAG#v}
+
+          TAG="r${IW}-lucky${LUCKY}-bandix${BANDIX}-luci${FRONT}"
+
+          {
+            echo "iw=$IW"
+            echo "lucky=$LUCKY"
+            echo "bandix=$BANDIX"
+            echo "front=$FRONT"
+            echo "bandix_tag=$BANDIX_TAG"
+            echo "front_tag=$FRONT_TAG"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 版本指纹"
+            echo ""
+            echo "| 组件 | 版本 |"
+            echo "|---|---|"
+            echo "| ImmortalWrt | \`$IW\` |"
+            echo "| lucky | \`$LUCKY\` |"
+            echo "| bandix | \`$BANDIX\` |"
+            echo "| luci-app-bandix | \`$FRONT\` |"
+            echo "| 产物 tag | \`$TAG\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "强制重建，忽略同名 Release"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::$TAG 已存在，跳过构建"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Free disk space
+        if: steps.ver.outputs.build == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install host deps
+        if: steps.ver.outputs.build == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends zstd jq
+
+      # ────────────────────────────────────── 2. 用 SDK 打出 lucky 的 3 个 apk
+      # bandix / luci-app-bandix 上游直接发 .apk，不用编；
+      # 只有 lucky 需要打包（其 Makefile 的 Build/Compile 为空，本质只是「下载官方
+      # 二进制 + 打包」，所以几分钟就好，不需要跑全量 buildroot）。
+      - name: Build lucky packages with SDK
+        if: steps.ver.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          IW="${{ steps.ver.outputs.iw }}"
+          BASE="https://downloads.immortalwrt.org/releases/${IW}/targets/${IW_TARGET}"
+
+          curl -fsSL --retry 3 "$BASE/sha256sums" -o /tmp/sums
+          SDK=$(awk -F'[*[:space:]]' '{print $NF}' /tmp/sums \
+                | grep -E '^immortalwrt-sdk-.*\.Linux-x86_64\.tar\.zst$' | head -1)
+          [ -n "$SDK" ] || { echo "::error::sha256sums 里找不到 SDK"; exit 1; }
+          echo "SDK = $SDK"
+
+          curl -fL --retry 3 --retry-delay 5 -o /tmp/sdk.tar.zst "$BASE/$SDK"
+          mkdir -p sdk
+          tar --zstd -xf /tmp/sdk.tar.zst -C sdk --strip-components=1
+
+          cd sdk
+          echo "src-git lucky ${LUCKY_FEED}" >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          {
+            echo 'CONFIG_PACKAGE_lucky=m'
+            echo 'CONFIG_PACKAGE_luci-app-lucky=m'
+            echo 'CONFIG_PACKAGE_luci-i18n-lucky-zh-cn=m'
+          } >> .config
+          make defconfig
+
+          echo "--- 选中的 lucky 相关配置 ---"
+          grep -E 'CONFIG_PACKAGE_(lucky|luci-app-lucky|luci-i18n-lucky)' .config || true
+
+          make package/lucky/compile V=s -j"$(nproc)"
+          make package/luci-app-lucky/compile V=s -j"$(nproc)"
+          make package/luci-i18n-lucky-zh-cn/compile V=s -j"$(nproc)" \
+            || echo "::warning::i18n 目标未生成，跳过（不影响主包）"
+
+          mkdir -p ../out-apk
+          find bin/packages -name '*.apk' -exec cp -v {} ../out-apk/ \;
+          echo "--- 产出的 apk ---"
+          ls -l ../out-apk
+
+      # ──────────────────────────────────────── 3. ImageBuilder 组装完整镜像
+      - name: Assemble image with ImageBuilder
+        if: steps.ver.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IW="${{ steps.ver.outputs.iw }}"
+          TAG="${{ steps.ver.outputs.tag }}"
+          BASE="https://downloads.immortalwrt.org/releases/${IW}/targets/${IW_TARGET}"
+
+          IB=$(awk -F'[*[:space:]]' '{print $NF}' /tmp/sums \
+               | grep -E '^immortalwrt-imagebuilder-.*\.Linux-x86_64\.tar\.zst$' | head -1)
+          [ -n "$IB" ] || { echo "::error::sha256sums 里找不到 ImageBuilder"; exit 1; }
+          echo "ImageBuilder = $IB"
+
+          curl -fL --retry 3 --retry-delay 5 -o /tmp/ib.tar.zst "$BASE/$IB"
+          mkdir -p ib
+          tar --zstd -xf /tmp/ib.tar.zst -C ib --strip-components=1
+
+          # 3.1 上游现成 apk（bandix 后端 + 前端 + 中文包）
+          gh release download "${{ steps.ver.outputs.bandix_tag }}" \
+             -R "$BANDIX_BACKEND" -p "*_${ARCH_PKGS}.apk" -D ib/packages/ --clobber
+          gh release download "${{ steps.ver.outputs.front_tag }}" \
+             -R "$BANDIX_FRONTEND" -p "luci-app-bandix-*.apk" \
+             -p "luci-i18n-bandix-zh-cn-*.apk" -D ib/packages/ --clobber
+
+          # 3.2 SDK 打出来的 lucky apk
+          cp -v out-apk/*.apk ib/packages/
+
+          # 3.3 逐个确认本地包是否齐全（缺哪个直接报错，不猜）
+          MISSING=""
+          for p in $CUSTOM_PKGS; do
+            if ls ib/packages/ | grep -qE "^${p}-[0-9]"; then
+              echo "  OK   $p"
+            else
+              echo "  MISS $p"
+              MISSING="$MISSING $p"
+            fi
+          done
+          [ -z "$MISSING" ] || { echo "::error::缺失本地包:$MISSING"; ls -l ib/packages/; exit 1; }
+
+          # 3.4 版本号 / 仓库地址写进镜像，供路由器上的 fwupdate 使用
+          mkdir -p files/etc
+          echo "$TAG" > files/etc/fw-version
+          echo "$GITHUB_REPOSITORY" > files/etc/fwupdate-repo
+          chmod +x files/usr/bin/fwupdate
+          ls -l files/etc files/usr/bin
+
+          EXTRA="${{ inputs.extra_packages }}"
+          [ -n "$EXTRA" ] || EXTRA="$DEFAULT_EXTRA"
+
+          # 3.5 组装。注意 PACKAGES 是「追加」语义，默认包不会丢。
+          cd ib
+          make image \
+            PROFILE="$PROFILE" \
+            PACKAGES="$CUSTOM_PKGS $EXTRA" \
+            FILES="$GITHUB_WORKSPACE/files" \
+            ROOTFS_PARTSIZE="$ROOTFS_PARTSIZE" \
+            V=s -j"$(nproc)"
+
+          echo "--- 产物 ---"
+          ls -lh "bin/targets/${IW_TARGET}/"
+
+          # 3.6 给下一步留个稳定的路径
+          IMGDIR="$(pwd)/bin/targets/${IW_TARGET}"
+          echo "IMGDIR=$IMGDIR" >> "$GITHUB_ENV"
+
+      # ───────────────────────────────────────────────────────── 4. 发 Release
+      - name: Publish release
+        if: steps.ver.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+
+          IMG=$(ls "$IMGDIR"/*squashfs-sysupgrade.img 2>/dev/null | head -1 || true)
+          if [ -z "$IMG" ]; then
+            IMG=$(ls "$IMGDIR"/*squashfs-sysupgrade.img.gz 2>/dev/null | head -1 || true)
+            [ -n "$IMG" ] && gunzip -c "$IMG" > /tmp/raw.img && IMG=/tmp/raw.img
+          fi
+          [ -n "$IMG" ] || { echo "::error::ImageBuilder 没产出 sysupgrade 镜像"; ls -l "$IMGDIR"; exit 1; }
+
+          mkdir -p /tmp/rel
+          cp "$IMG" "/tmp/rel/r66s-${TAG}.img"
+          gzip -9 "/tmp/rel/r66s-${TAG}.img"
+          ( cd /tmp/rel && sha256sum "r66s-${TAG}.img.gz" > "r66s-${TAG}.img.gz.sha256" )
+
+          for f in out-apk/*.apk; do
+            [ -e "$f" ] && cp "$f" /tmp/rel/
+          done
+          cp ib/bin/targets/${IW_TARGET}/*.manifest /tmp/rel/ 2>/dev/null || true
+
+          ls -lh /tmp/rel
+
+          gh release create "$TAG" /tmp/rel/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes "ImmortalWrt ${{ steps.ver.outputs.iw }} · Lunzn FastRhino R66S (rockchip/armv8)
+
+          | 组件 | 版本 |
+          |---|---|
+          | ImmortalWrt | ${{ steps.ver.outputs.iw }} |
+          | lucky | ${{ steps.ver.outputs.lucky }} |
+          | bandix | ${{ steps.ver.outputs.bandix }} |
+          | luci-app-bandix | ${{ steps.ver.outputs.front }} |
+
+          **路由器上升级**
+
+          \`\`\`sh
+          fwupdate          # 检查 + 确认升级
+          fwupdate -c       # 只检查
+          \`\`\`
+
+          **手动刷写**：下载 \`r66s-${TAG}.img.gz\` 后
+          \`\`\`sh
+          sysupgrade -v /tmp/r66s-${TAG}.img.gz
+          \`\`\`"
+
+      - name: Upload apks as artifact
+        if: always() && steps.ver.outputs.build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-apks-${{ steps.ver.outputs.tag }}
+          path: out-apk/*.apk
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo ""
+            echo "构建执行：\`${{ steps.ver.outputs.build }}\`"
+            echo "版本：\`${{ steps.ver.outputs.tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

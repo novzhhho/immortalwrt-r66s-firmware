@@ -1,0 +1,22 @@
+#!/bin/sh
+# 首次启动时初始化 fwupdate 的 uci 配置，并保证配置能挺过系统升级
+[ -x /usr/bin/fwupdate ] || chmod +x /usr/bin/fwupdate 2>/dev/null
+
+REPO=$(cat /etc/fwupdate-repo 2>/dev/null | tr -d ' \r\n')
+
+if [ -n "$REPO" ]; then
+	touch /etc/config/fwupdate
+	if ! uci -q get fwupdate.main >/dev/null 2>&1; then
+		uci set fwupdate.main=main
+		uci set fwupdate.main.repo="$REPO"
+		uci commit fwupdate
+	fi
+fi
+
+# 让 /etc/config/fwupdate 进入升级备份
+if [ -f /etc/sysupgrade.conf ]; then
+	grep -qxF '/etc/config/fwupdate' /etc/sysupgrade.conf 2>/dev/null || \
+		echo '/etc/config/fwupdate' >> /etc/sysupgrade.conf
+fi
+
+exit 0

@@ -1,0 +1,9 @@
+# 仓库内一律使用 LF：这些文件会被直接跑在 Linux / OpenWrt 上
+* text=auto eol=lf
+
+# 明确标记为二进制，避免任何换行转换
+*.png binary
+*.jpg binary
+*.zst binary
+*.gz binary
+*.apk binary

@@ -1,0 +1,11 @@
+# 构建产物与本机临时文件
+out-apk/
+ib/
+sdk/
+*.img
+*.img.gz
+*.apk
+
+# 构建时动态生成的元数据（每次 CI 自己写）
+files/etc/fw-version
+files/etc/fwupdate-repo
