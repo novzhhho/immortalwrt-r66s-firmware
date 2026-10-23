@@ -254,11 +254,19 @@ jobs:
 
           cp -v out-apk/*.apk ib/packages/
 
-          # 3.1 包名：4 个核心包写死，i18n 包从 _all.apk 反推（命名随版本变）
+          # 3.1 包名：4 个核心包写死，i18n 包从文件名反推（命名随版本变）
+          #     文件名格式是 <包名>-<版本>.apk，版本必以数字开头，例如
+          #     luci-i18n-bandix-zh-cn-26.271.52516~159a6de.apk
+          #     → 砍掉结尾的 "-<数字开头的版本>" 即得包名。
           CUSTOM="$CORE_PKGS"
           for f in out-apk/luci-i18n-*.apk; do
             [ -e "$f" ] || continue
-            n=$(basename "$f" | sed -E 's/-[0-9][^-]*(-r[0-9]+)?_all\.apk$//')
+            n=$(basename "$f" .apk | sed -E 's/-[0-9][0-9a-zA-Z.~+_-]*$//')
+            # 只装简体中文；SDK 会顺手把所有语言都编出来，但装进镜像纯属浪费
+            case "$n" in
+              *-zh-cn|*-zh_Hans) ;;
+              *) echo "  skip $n（非简体中文）"; continue ;;
+            esac
             case " $CUSTOM " in *" $n "*) ;; *) CUSTOM="$CUSTOM $n" ;; esac
           done
           echo "自定义包清单: $CUSTOM"
