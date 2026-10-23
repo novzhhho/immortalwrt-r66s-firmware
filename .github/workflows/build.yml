@@ -182,7 +182,8 @@ jobs:
           BM=feeds/bandix/openwrt-bandix/Makefile
           [ -f "$BM" ] || { echo "::error::找不到 $BM"; ls feeds/; exit 1; }
           sed -i 's|^include \$(TOPDIR)/feeds/packages/lang/rust/rust-values.mk|RUSTC_TARGET_ARCH:=$(ARCH)-unknown-linux-musl|' "$BM"
-          if grep -q 'rust-values.mk' "$BM"; then
+          # 只检查 include 行（Makefile 里还有一行注释也提到 rust-values.mk）
+          if grep -qE '^[[:space:]]*include.*rust-values\.mk' "$BM"; then
             echo "::error::rust 依赖补丁未生效"; grep -n 'rust' "$BM"; exit 1
           fi
           grep -n 'RUSTC_TARGET_ARCH' "$BM"
