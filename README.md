@@ -94,3 +94,9 @@ core 发版后 feed 的 Makefile 常常滞后几天，盯 Release 会导致「�
   本仓库的构建路径完全绕开了 ASU。
 - 首次从官方 25.12.x 刷到本镜像时，`fwupdate` 还不存在，需要手动下载 Release 里的
   `.img.gz` 后 `sysupgrade -v`；之后就可以用 `fwupdate` 一键了。
+- **上游没更新时手动强制重建，tag 不会变**（tag 只由三方版本指纹组成），Release 会被
+  原地覆盖（`gh release upload --clobber`）。此时路由器上 `/etc/fw-version` 与新版 tag
+  相同，`fwupdate` 会判定「已是最新」，需要用 `fwupdate -f` 强制重刷。
+  正常的上游更新（immortalwrt / lucky / bandix 任一变化）会产生新 tag，没这个问题。
+- `fwupdate` 依赖 `curl`、`jsonfilter`、`sha256sum`、`hexdump`。注意**不要**改成依赖 `od`：
+  ImmortalWrt(apk 版) 默认不带 `od`（`od: not found`），只有 `hexdump`。
