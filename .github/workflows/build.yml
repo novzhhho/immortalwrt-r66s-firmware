@@ -336,29 +336,47 @@ jobs:
 
           ls -lh /tmp/rel
 
-          gh release create "$TAG" /tmp/rel/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" \
-            --notes "ImmortalWrt ${{ steps.ver.outputs.iw }} · Lunzn FastRhino R66S (rockchip/armv8)
+          # Release 必须幂等：上游版本没变时 tag 不变，同一个 tag 往往已经发布过，
+          # 直接 gh release create 会报
+          #   "a release with the same tag name already exists"
+          # 已存在就覆盖资产 + 更新说明（用 --clobber），不删 Release，
+          # 这样下载计数、外部引用链接都保得住。
+          {
+            echo "## ImmortalWrt ${{ steps.ver.outputs.iw }} · Lunzn FastRhino R66S (rockchip/armv8)"
+            echo
+            echo "| 组件 | 版本 |"
+            echo "|---|---|"
+            echo "| ImmortalWrt | ${{ steps.ver.outputs.iw }} |"
+            echo "| lucky | ${{ steps.ver.outputs.lucky }} |"
+            echo "| bandix | ${{ steps.ver.outputs.bandix }} |"
+            echo "| luci-app-bandix | ${{ steps.ver.outputs.front }} |"
+            echo
+            echo "lucky 与 bandix 已编入固件，升级后无需重装。"
+            echo
+            echo "### 路由器上升级"
+            echo '```sh'
+            echo "fwupdate -c    # 只检查"
+            echo "fwupdate       # 检查 + 确认升级"
+            echo '```'
+            echo
+            echo "### 手动刷写"
+            echo "下载 \`r66s-${TAG}.img.gz\` 后："
+            echo '```sh'
+            echo "sysupgrade -v /tmp/r66s-${TAG}.img.gz"
+            echo '```'
+          } > /tmp/notes.md
 
-          | 组件 | 版本 |
-          |---|---|
-          | ImmortalWrt | ${{ steps.ver.outputs.iw }} |
-          | lucky | ${{ steps.ver.outputs.lucky }} |
-          | bandix | ${{ steps.ver.outputs.bandix }} |
-          | luci-app-bandix | ${{ steps.ver.outputs.front }} |
-
-          **路由器上升级**
-
-          \`\`\`sh
-          fwupdate          # 检查 + 确认升级
-          fwupdate -c       # 只检查
-          \`\`\`
-
-          **手动刷写**：下载 \`r66s-${TAG}.img.gz\` 后
-          \`\`\`sh
-          sysupgrade -v /tmp/r66s-${TAG}.img.gz
-          \`\`\`"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在 → 覆盖资产并更新说明"
+            gh release upload "$TAG" /tmp/rel/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes-file /tmp/notes.md
+          else
+            gh release create "$TAG" /tmp/rel/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --notes-file /tmp/notes.md
+          fi
 
       - name: Upload artifacts
         if: always() && steps.ver.outputs.build == 'true'
