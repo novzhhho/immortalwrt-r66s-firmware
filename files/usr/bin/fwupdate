@@ -16,7 +16,7 @@
 
 REPO_FILE=/etc/fw-version      # 里面存的是构建时的版本 tag（只读展示用）
 REPO_CFG=/etc/fwupdate-repo    # 里面存的是 owner/repo
-WORK=/tmp/fwupdate
+WORK=/tmp/fwupdate.d
 
 CHECK_ONLY=0
 ASSUME_YES=0
@@ -37,6 +37,17 @@ done
 
 die()  { echo "[fwupdate] 错误: $*" >&2; exit 1; }
 info() { echo "[fwupdate] $*"; }
+
+# 取文件前 2 字节的十六进制。
+# 注意：ImmortalWrt(apk 版) 默认**不带 od**（实测 od: not found），
+# 只有 /usr/bin/hexdump；所以以 hexdump 为主、od 为备，两者都没有就返回空。
+hex2() {
+	if command -v hexdump >/dev/null 2>&1; then
+		hexdump -v -n 2 -e '2/1 "%02x"' "$1" 2>/dev/null
+	elif command -v od >/dev/null 2>&1; then
+		od -An -tx1 -N 2 "$1" 2>/dev/null | tr -d ' \n'
+	fi
+}
 
 REPO=$(uci -q get fwupdate.main.repo)
 [ -n "$REPO" ] || REPO=$(cat "$REPO_CFG" 2>/dev/null | tr -d ' \r\n')
@@ -95,7 +106,12 @@ case "$SIZE" in
 esac
 
 info "下载:     $DL"
-curl -fL --retry 3 --connect-timeout 15 --progress-bar -o "$IMG" "$DL" || die "下载失败"
+# 只有交互终端才显示进度条；LuCI/非 tty 下静默，避免刷屏
+if [ -t 1 ]; then
+	curl -fL --retry 3 --connect-timeout 15 --progress-bar -o "$IMG" "$DL" || die "下载失败"
+else
+	curl -fsSL --retry 3 --connect-timeout 15 -o "$IMG" "$DL" || die "下载失败"
+fi
 
 # 校验 sha256：先试 <url>.sha256，再试同名 .sha256
 SHA=""
@@ -123,9 +139,14 @@ fi
 # busybox 下更是不可预期 —— 拿它判完整性会误杀正常镜像。完整性由 sha256 保证。
 case "$IMG" in
 	*.gz)
-		magic=$(dd if="$IMG" bs=2 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
-		[ "$magic" = "1f8b" ] || die "不是 gzip 文件（魔数: $magic）"
-		info "gzip:     魔数校验通过"
+		magic=$(hex2 "$IMG")
+		if [ -z "$magic" ]; then
+			info "gzip:     跳过格式检查（无 hexdump/od）"
+		elif [ "$magic" = "1f8b" ]; then
+			info "gzip:     魔数校验通过"
+		else
+			die "不是 gzip 文件（魔数: $magic）"
+		fi
 		;;
 esac
 
