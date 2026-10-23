@@ -132,7 +132,11 @@ jobs:
         if: steps.ver.outputs.build == 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends zstd jq
+          sudo apt-get install -y --no-install-recommends zstd jq python3-pyelftools \
+            || sudo pip3 install --break-system-packages pyelftools
+          # SDK 的全局 prereq 会检查 u-boot 等包，需要 elftools
+          python3 -c "import elftools; print('pyelftools ok')"
+          zstd --version
 
       # ────────────────────────────────────── 2. 用 SDK 打出 lucky 的 3 个 apk
       # bandix / luci-app-bandix 上游直接发 .apk，不用编；
@@ -210,17 +214,25 @@ jobs:
           # 3.2 SDK 打出来的 lucky apk
           cp -v out-apk/*.apk ib/packages/
 
-          # 3.3 逐个确认本地包是否齐全（缺哪个直接报错，不猜）
-          MISSING=""
+          # 3.3 逐个确认本地包（必需的缺了就报错；i18n 缺了只告警，不阻塞）
+          PRESENT=""
+          REQUIRED="bandix luci-app-bandix lucky luci-app-lucky"
           for p in $CUSTOM_PKGS; do
             if ls ib/packages/ | grep -qE "^${p}-[0-9]"; then
               echo "  OK   $p"
+              PRESENT="$PRESENT $p"
             else
               echo "  MISS $p"
-              MISSING="$MISSING $p"
             fi
           done
-          [ -z "$MISSING" ] || { echo "::error::缺失本地包:$MISSING"; ls -l ib/packages/; exit 1; }
+          for p in $REQUIRED; do
+            case " $PRESENT " in
+              *" $p "*) ;;
+              *) echo "::error::缺少必需包: $p"; ls -l ib/packages/; exit 1 ;;
+            esac
+          done
+          CUSTOM="$PRESENT"
+          echo "实际打包: $CUSTOM"
 
           # 3.4 版本号 / 仓库地址写进镜像，供路由器上的 fwupdate 使用
           mkdir -p files/etc
@@ -236,7 +248,7 @@ jobs:
           cd ib
           make image \
             PROFILE="$PROFILE" \
-            PACKAGES="$CUSTOM_PKGS $EXTRA" \
+            PACKAGES="$CUSTOM $EXTRA" \
             FILES="$GITHUB_WORKSPACE/files" \
             ROOTFS_PARTSIZE="$ROOTFS_PARTSIZE" \
             V=s -j"$(nproc)"
