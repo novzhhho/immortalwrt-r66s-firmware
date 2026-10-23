@@ -148,6 +148,7 @@ jobs:
       # "package mentioned in index not found"。自己打一遍格式就统一了。
       - name: Build custom packages with SDK
         if: steps.ver.outputs.build == 'true'
+        timeout-minutes: 45          # 正常 6~10 分钟；超了说明又混进了重量级依赖
         run: |
           set -euo pipefail
           IW="${{ steps.ver.outputs.iw }}"
@@ -173,6 +174,19 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+          # ★ 关键补丁：bandix 的 Makefile 只为了拿 RUSTC_TARGET_ARCH（用来拼下载
+          #   文件名）而 include 了 feeds/packages/lang/rust/rust-values.mk，
+          #   这会让 rust/host 变成构建依赖，SDK 就开始从源码编 rustc —— 单这一步
+          #   就要 1~2 小时，必然超时。而它的 Build/Compile 是空的（只下载官方
+          #   预编译二进制再打包），根本不需要 rust。用等价定义替换掉那行 include。
+          BM=feeds/bandix/openwrt-bandix/Makefile
+          [ -f "$BM" ] || { echo "::error::找不到 $BM"; ls feeds/; exit 1; }
+          sed -i 's|^include \$(TOPDIR)/feeds/packages/lang/rust/rust-values.mk|RUSTC_TARGET_ARCH:=$(ARCH)-unknown-linux-musl|' "$BM"
+          if grep -q 'rust-values.mk' "$BM"; then
+            echo "::error::rust 依赖补丁未生效"; grep -n 'rust' "$BM"; exit 1
+          fi
+          grep -n 'RUSTC_TARGET_ARCH' "$BM"
+
           {
             echo 'CONFIG_PACKAGE_lucky=m'
             echo 'CONFIG_PACKAGE_luci-app-lucky=m'
@@ -188,6 +202,11 @@ jobs:
 
           echo "--- 选中的相关配置 ---"
           grep -E 'CONFIG_PACKAGE_(lucky|luci-app-lucky|bandix|luci-app-bandix|luci-i18n-lucky|luci-i18n-bandix)' .config || true
+
+          # 兜底：如果 rust 又被带进来，立刻失败，别白跑一小时
+          if grep -qE '^CONFIG_PACKAGE_rust' .config; then
+            echo "::error::rust 被选进了 .config，构建会超时"; grep -E '^CONFIG_PACKAGE_rust' .config; exit 1
+          fi
 
           # 只选了这几个包，直接整体编译即可（依赖会被 defconfig 自动带上）
           make -j"$(nproc)" V=s
