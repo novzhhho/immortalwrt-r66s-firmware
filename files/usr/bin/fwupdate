@@ -117,21 +117,15 @@ else
 	info "sha256:   Release 未提供校验文件，跳过"
 fi
 
-# 轻量合法性检查：.gz 必须能通过 gzip 校验
-# 注意：ImmortalWrt 的 sysupgrade.img.gz 在 gzip 流末尾附加了一段元数据，
-# gzip -t 因此返回 2（"trailing garbage ignored"）——那是 sysupgrade 需要的
-# 东西，不是损坏。只有返回 1（真正的错误）才算坏。
+# 轻量合法性检查：只验 gzip 魔数。
+# 不能靠 gzip -t 的退出码：ImmortalWrt 的 sysupgrade.img.gz 在 gzip 流末尾
+# 附加了一段 sysupgrade 需要的元数据，GNU gzip 会返回 2（trailing garbage），
+# busybox 下更是不可预期 —— 拿它判完整性会误杀正常镜像。完整性由 sha256 保证。
 case "$IMG" in
 	*.gz)
-		gzip -t "$IMG" 2>/dev/null
-		rc=$?
-		if [ "$rc" = 0 ]; then
-			info "gzip:     校验通过"
-		elif [ "$rc" = 2 ]; then
-			info "gzip:     校验通过（含 sysupgrade 附加元数据）"
-		else
-			die "镜像 gzip 损坏（gzip -t 退出码 $rc）"
-		fi
+		magic=$(dd if="$IMG" bs=2 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+		[ "$magic" = "1f8b" ] || die "不是 gzip 文件（魔数: $magic）"
+		info "gzip:     魔数校验通过"
 		;;
 esac
 
