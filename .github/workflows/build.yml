@@ -204,13 +204,25 @@ jobs:
           echo "--- 选中的相关配置 ---"
           grep -E 'CONFIG_PACKAGE_(lucky|luci-app-lucky|bandix|luci-app-bandix|luci-i18n-lucky|luci-i18n-bandix)' .config || true
 
-          # 兜底：如果 rust 又被带进来，立刻失败，别白跑一小时
-          if grep -qE '^CONFIG_PACKAGE_rust' .config; then
-            echo "::error::rust 被选进了 .config，构建会超时"; grep -E '^CONFIG_PACKAGE_rust' .config; exit 1
-          fi
+          # ★ 只编译这 4 个目录，绝不跑全局 make。
+          #   SDK 的 defconfig 会顺带把 rust、rustdesk-server 之类上千个包选成 =m，
+          #   全局 make 就会去源码编 rustc（1~2 小时，必超时）。按目录定点编译时，
+          #   只会构建这 4 个包的依赖，rust 不会被碰。
+          #   i18n 包（luci-i18n-*）定义在各自的 app Makefile 里，会一并产出。
+          TARGETS="package/feeds/lucky/lucky
+                   package/feeds/lucky/luci-app-lucky
+                   package/feeds/bandix/openwrt-bandix
+                   package/feeds/bandix_luci/luci-app-bandix"
 
-          # 只选了这几个包，直接整体编译即可（依赖会被 defconfig 自动带上）
-          make -j"$(nproc)" V=s
+          BUILD=""
+          for t in $TARGETS; do
+            [ -f "$t/Makefile" ] || { echo "::error::找不到 $t/Makefile"; ls package/feeds/ 2>/dev/null; exit 1; }
+            BUILD="$BUILD $t/compile"
+          done
+          echo "编译目标:$BUILD"
+
+          # shellcheck disable=SC2086
+          make -j"$(nproc)" V=s $BUILD
 
           # 只挑我们要的那 6 个（其余依赖包不进镜像，避免和官方源版本打架）
           mkdir -p ../out-apk
