@@ -309,16 +309,26 @@ jobs:
           set -euo pipefail
           TAG="${{ steps.ver.outputs.tag }}"
 
-          IMG=$(ls "$IMGDIR"/*squashfs-sysupgrade.img 2>/dev/null | head -1 || true)
-          if [ -z "$IMG" ]; then
-            GZ=$(ls "$IMGDIR"/*squashfs-sysupgrade.img.gz 2>/dev/null | head -1 || true)
-            if [ -n "$GZ" ]; then gunzip -c "$GZ" > /tmp/raw.img; IMG=/tmp/raw.img; fi
-          fi
-          [ -n "$IMG" ] || { echo "::error::ImageBuilder 没产出 sysupgrade 镜像"; ls -l "$IMGDIR"; exit 1; }
+          # 直接转发 ImageBuilder 产出的 .img.gz。
+          # 注意：ImmortalWrt 的 sysupgrade.img.gz 在 gzip 流末尾附加了一段元数据，
+          # `gunzip -c` 会报 "trailing garbage ignored" 并以退出码 2 结束，配合
+          # set -e 会直接中断。这段元数据是 sysupgrade 需要的，不能丢，
+          # 所以不要解压再压，原样复制改名即可（sysupgrade 本身能直接吃 .img.gz）。
+          SRC_GZ=$(ls "$IMGDIR"/*squashfs-sysupgrade.img.gz 2>/dev/null | head -1 || true)
+          SRC_RAW=$(ls "$IMGDIR"/*squashfs-sysupgrade.img 2>/dev/null | head -1 || true)
+          [ -n "$SRC_GZ$SRC_RAW" ] || {
+            echo "::error::ImageBuilder 没产出 squashfs sysupgrade 镜像"; ls -l "$IMGDIR"; exit 1
+          }
 
           mkdir -p /tmp/rel
-          cp "$IMG" "/tmp/rel/r66s-${TAG}.img"
-          gzip -9 "/tmp/rel/r66s-${TAG}.img"
+          if [ -n "$SRC_GZ" ]; then
+            echo "使用已压缩镜像: $(basename "$SRC_GZ")"
+            cp "$SRC_GZ" "/tmp/rel/r66s-${TAG}.img.gz"
+          else
+            echo "使用未压缩镜像: $(basename "$SRC_RAW")"
+            cp "$SRC_RAW" "/tmp/rel/r66s-${TAG}.img"
+            gzip -9 "/tmp/rel/r66s-${TAG}.img"
+          fi
           ( cd /tmp/rel && sha256sum "r66s-${TAG}.img.gz" > "r66s-${TAG}.img.gz.sha256" )
 
           cp out-apk/*.apk /tmp/rel/
@@ -350,12 +360,14 @@ jobs:
           sysupgrade -v /tmp/r66s-${TAG}.img.gz
           \`\`\`"
 
-      - name: Upload apks as artifact
+      - name: Upload artifacts
         if: always() && steps.ver.outputs.build == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: custom-apks-${{ steps.ver.outputs.tag }}
-          path: out-apk/*.apk
+          name: firmware-${{ steps.ver.outputs.tag }}
+          path: |
+            out-apk/*.apk
+            ib/bin/targets/${{ env.IW_TARGET }}/*squashfs-sysupgrade.img.gz
           if-no-files-found: warn
           retention-days: 14
 
