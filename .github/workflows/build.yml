@@ -101,7 +101,10 @@ jobs:
           fi
           [ -n "$PLUGIN_SHA" ] || { echo "::error::取不到 ${PLUGIN_REPO} 的最新提交"; exit 1; }
 
-          TAG="r${IW}-lucky${LUCKY}-bandix${BANDIX}-luci${FRONT}-ui${PLUGIN_SHA}"
+          # 段名要能自解释：luci-app-bandix 是 bandix 的网页面板，和 bandix 守护进程
+          # 分属两个仓库、版本号也不同，所以段名用 bandixweb 而不是 luci
+          # （写成 luci0.12.12 会被误读成 LuCI 本体的版本）。
+          TAG="r${IW}-lucky${LUCKY}-bandix${BANDIX}-bandixweb${FRONT}-fw${PLUGIN_SHA}"
 
           {
             echo "iw=$IW"
@@ -119,9 +122,9 @@ jobs:
             echo "|---|---|"
             echo "| ImmortalWrt | \`$IW\` |"
             echo "| lucky | \`$LUCKY\` |"
-            echo "| bandix | \`$BANDIX\` |"
-            echo "| luci-app-bandix | \`$FRONT\` |"
-            echo "| luci-app-fwupdate | \`${PLUGIN_SHA}\` |"
+            echo "| bandix（守护进程） | \`$BANDIX\` |"
+            echo "| bandixweb（luci-app-bandix 面板） | \`$FRONT\` |"
+            echo "| 升级插件 luci-app-fwupdate | \`${PLUGIN_SHA}\` |"
             echo "| 产物 tag | \`$TAG\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -382,9 +385,9 @@ jobs:
             echo "|---|---|"
             echo "| ImmortalWrt | ${{ steps.ver.outputs.iw }} |"
             echo "| lucky | ${{ steps.ver.outputs.lucky }} |"
-            echo "| bandix | ${{ steps.ver.outputs.bandix }} |"
-            echo "| luci-app-bandix | ${{ steps.ver.outputs.front }} |"
-            echo "| luci-app-fwupdate | \`${{ steps.ver.outputs.plugin }}\` |"
+            echo "| bandix（守护进程） | ${{ steps.ver.outputs.bandix }} |"
+            echo "| bandixweb（luci-app-bandix 面板） | ${{ steps.ver.outputs.front }} |"
+            echo "| 升级插件 luci-app-fwupdate | \`${{ steps.ver.outputs.plugin }}\` |"
             echo
             echo "lucky 与 bandix 已编入固件，升级后无需重装。"
             echo

@@ -32,8 +32,11 @@ files/                            # 会被塞进镜像的文件（ImageBuilder �
 ## 工作流
 
 - **每天 02:00（北京时间）** 轮询三处上游版本 + 升级插件的提交 sha，拼成指纹
-  `r25.12.2-lucky2.27.2-bandix0.12.11-luci0.12.12-uib89be23`；
+  `r25.12.2-lucky2.27.2-bandix0.12.11-bandixweb0.12.12-fw924dec8`；
   若该 tag 的 Release 已存在则**直接跳过**，不浪费 Actions 时间。
+  - 段名含义：`bandix` 是流量统计的守护进程，`bandixweb` 是它的 LuCI 面板
+    （`luci-app-bandix`，独立仓库、独立版本号），`fw` 是升级插件自身的提交。
+    早先这两段写成 `bandix` / `luci`，`luci0.12.12` 会被误读成 LuCI 本体的版本。
 - 手动触发：Actions → Firmware Build → Run workflow
   - `force`：忽略已有 Release 强制重建
   - `extra_packages`：临时覆盖额外包清单
