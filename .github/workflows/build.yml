@@ -43,8 +43,11 @@ env:
   BANDIX_FEED: https://github.com/timsaya/openwrt-bandix.git;main
   BANDIX_LUCI_FEED: https://github.com/timsaya/luci-app-bandix.git;main
 
-  # 由 SDK 统一打包的 6 个包（i18n 的具体命名随版本不同，构建时自动识别）
-  CORE_PKGS: bandix luci-app-bandix lucky luci-app-lucky
+  # 自研升级插件（本地包，随镜像编译；改动它会改变版本指纹 → 触发新 Release）
+  PLUGIN_REPO: novzhhho/luci-app-fwupdate
+
+  # 由 SDK 统一打包的包（i18n 的具体命名随版本不同，构建时自动识别）
+  CORE_PKGS: bandix luci-app-bandix lucky luci-app-lucky luci-app-fwupdate
 
   # 额外打进镜像的官方包（已用 ImmortalWrt 构建服务器校验过名字全部存在）
   DEFAULT_EXTRA: >-
@@ -89,13 +92,23 @@ jobs:
             [ -n "$v" ] || { echo "::error::取不到插件版本号"; exit 1; }
           done
 
-          TAG="r${IW}-lucky${LUCKY}-bandix${BANDIX}-luci${FRONT}"
+          # 升级插件自己的提交指纹：插件代码一改 tag 就变，路由器才会看到新 Release
+          # 用 ls-remote 而不是 API：不消耗限流、也不需要跨仓库权限
+          PLUGIN_SHA=$(git ls-remote "https://github.com/${PLUGIN_REPO}.git" refs/heads/main 2>/dev/null | cut -c1-7)
+          if [ -z "$PLUGIN_SHA" ]; then
+            PLUGIN_SHA=$(curl -fsSL --retry 3 "https://api.github.com/repos/${PLUGIN_REPO}/commits/main" \
+              | jq -r 'if .sha then .sha[0:7] else empty end')
+          fi
+          [ -n "$PLUGIN_SHA" ] || { echo "::error::取不到 ${PLUGIN_REPO} 的最新提交"; exit 1; }
+
+          TAG="r${IW}-lucky${LUCKY}-bandix${BANDIX}-luci${FRONT}-ui${PLUGIN_SHA}"
 
           {
             echo "iw=$IW"
             echo "lucky=$LUCKY"
             echo "bandix=$BANDIX"
             echo "front=$FRONT"
+            echo "plugin=$PLUGIN_SHA"
             echo "tag=$TAG"
           } >> "$GITHUB_OUTPUT"
 
@@ -108,6 +121,7 @@ jobs:
             echo "| lucky | \`$LUCKY\` |"
             echo "| bandix | \`$BANDIX\` |"
             echo "| luci-app-bandix | \`$FRONT\` |"
+            echo "| luci-app-fwupdate | \`${PLUGIN_SHA}\` |"
             echo "| 产物 tag | \`$TAG\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -174,6 +188,13 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+          # 升级插件：本地包，直接 clone 进 package/（不走 feeds）
+          rm -rf package/luci-app-fwupdate
+          git clone --depth 1 --branch main \
+            "https://github.com/${PLUGIN_REPO}.git" package/luci-app-fwupdate
+          [ -f package/luci-app-fwupdate/Makefile ] || { echo "::error::插件 clone 失败"; exit 1; }
+          echo "插件 commit: $(git -C package/luci-app-fwupdate rev-parse --short=7 HEAD)"
+
           # ★ 关键补丁：bandix 的 Makefile 只为了拿 RUSTC_TARGET_ARCH（用来拼下载
           #   文件名）而 include 了 feeds/packages/lang/rust/rust-values.mk，
           #   这会让 rust/host 变成构建依赖，SDK 就开始从源码编 rustc —— 单这一步
@@ -193,6 +214,7 @@ jobs:
             echo 'CONFIG_PACKAGE_luci-app-lucky=m'
             echo 'CONFIG_PACKAGE_bandix=m'
             echo 'CONFIG_PACKAGE_luci-app-bandix=m'
+            echo 'CONFIG_PACKAGE_luci-app-fwupdate=m'
             # i18n 包名在不同版本下可能是 zh-cn / zh_Hans，全部打开，能选几个算几个
             echo 'CONFIG_PACKAGE_luci-i18n-lucky-zh-cn=m'
             echo 'CONFIG_PACKAGE_luci-i18n-lucky-zh_Hans=m'
@@ -202,17 +224,18 @@ jobs:
           make defconfig
 
           echo "--- 选中的相关配置 ---"
-          grep -E 'CONFIG_PACKAGE_(lucky|luci-app-lucky|bandix|luci-app-bandix|luci-i18n-lucky|luci-i18n-bandix)' .config || true
+          grep -E 'CONFIG_PACKAGE_(lucky|luci-app-lucky|bandix|luci-app-bandix|luci-app-fwupdate|luci-i18n-lucky|luci-i18n-bandix)' .config || true
 
-          # ★ 只编译这 4 个目录，绝不跑全局 make。
+          # ★ 只编译这几个目录，绝不跑全局 make。
           #   SDK 的 defconfig 会顺带把 rust、rustdesk-server 之类上千个包选成 =m，
           #   全局 make 就会去源码编 rustc（1~2 小时，必超时）。按目录定点编译时，
-          #   只会构建这 4 个包的依赖，rust 不会被碰。
+          #   只会构建这些包的依赖，rust 不会被碰。
           #   i18n 包（luci-i18n-*）定义在各自的 app Makefile 里，会一并产出。
           TARGETS="package/feeds/lucky/lucky
                    package/feeds/lucky/luci-app-lucky
                    package/feeds/bandix/openwrt-bandix
-                   package/feeds/bandix_luci/luci-app-bandix"
+                   package/feeds/bandix_luci/luci-app-bandix
+                   package/luci-app-fwupdate"
 
           BUILD=""
           for t in $TARGETS; do
@@ -224,10 +247,11 @@ jobs:
           # shellcheck disable=SC2086
           make -j"$(nproc)" V=s $BUILD
 
-          # 只挑我们要的那 6 个（其余依赖包不进镜像，避免和官方源版本打架）
+          # 只挑我们要的那些（其余依赖包不进镜像，避免和官方源版本打架）
           mkdir -p ../out-apk
           for pat in "bandix-*" "luci-app-bandix-*" "luci-i18n-bandix-*" \
-                     "lucky-*" "luci-app-lucky-*" "luci-i18n-lucky-*"; do
+                     "lucky-*" "luci-app-lucky-*" "luci-i18n-lucky-*" \
+                     "luci-app-fwupdate-*"; do
             find bin/packages -name "${pat}.apk" -exec cp -v {} ../out-apk/ \; 2>/dev/null || true
           done
           echo "--- 产出的 apk ---"
@@ -278,11 +302,11 @@ jobs:
             echo "  OK   $p"
           done
 
-          # 3.3 版本号 / 仓库地址写进镜像，供路由器上的 fwupdate 使用
+          # 3.3 版本号 / 仓库地址写进镜像，供路由器上的 fwupdate 与升级插件使用
+          #     /usr/bin/fwupdate 由 luci-app-fwupdate 包提供，不再从这里注入
           mkdir -p files/etc
           echo "$TAG" > files/etc/fw-version
           echo "$GITHUB_REPOSITORY" > files/etc/fwupdate-repo
-          chmod +x files/usr/bin/fwupdate
 
           EXTRA="${{ inputs.extra_packages }}"
           [ -n "$EXTRA" ] || EXTRA="$DEFAULT_EXTRA"
@@ -350,10 +374,14 @@ jobs:
             echo "| lucky | ${{ steps.ver.outputs.lucky }} |"
             echo "| bandix | ${{ steps.ver.outputs.bandix }} |"
             echo "| luci-app-bandix | ${{ steps.ver.outputs.front }} |"
+            echo "| luci-app-fwupdate | \`${{ steps.ver.outputs.plugin }}\` |"
             echo
             echo "lucky 与 bandix 已编入固件，升级后无需重装。"
             echo
-            echo "### 路由器上升级"
+            echo "### 网页一键升级（推荐）"
+            echo "LuCI → 系统 → 固件升级：点「检查更新」→「立即升级」，页面实时显示下载进度。"
+            echo
+            echo "### 命令行升级"
             echo '```sh'
             echo "fwupdate -c    # 只检查"
             echo "fwupdate       # 检查 + 确认升级"
