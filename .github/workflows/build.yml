@@ -190,10 +190,20 @@ jobs:
 
           # 升级插件：本地包，直接 clone 进 package/（不走 feeds）
           rm -rf package/luci-app-fwupdate
-          git clone --depth 1 --branch main \
+          git clone --branch main \
             "https://github.com/${PLUGIN_REPO}.git" package/luci-app-fwupdate
           [ -f package/luci-app-fwupdate/Makefile ] || { echo "::error::插件 clone 失败"; exit 1; }
-          echo "插件 commit: $(git -C package/luci-app-fwupdate rev-parse --short=7 HEAD)"
+
+          # 与插件仓库自己的 apk.yml 保持一致的版本规则：
+          #   PKG_RELEASE = commit 数（保证 apk 版本递增，路由器上能覆盖安装）
+          #   另外烧进 commit 短 sha，界面显示 + 自更新比对都靠它
+          PCOUNT=$(git -C package/luci-app-fwupdate rev-list --count HEAD)
+          PSHA=$(git -C package/luci-app-fwupdate rev-parse --short=7 HEAD)
+          echo "插件 commit: $PSHA (#$PCOUNT)"
+          mkdir -p package/luci-app-fwupdate/root/usr/share/luci-app-fwupdate
+          echo "$PSHA" > package/luci-app-fwupdate/root/usr/share/luci-app-fwupdate/build
+          sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${PCOUNT}/" package/luci-app-fwupdate/Makefile
+          grep -E '^PKG_(VERSION|RELEASE)' package/luci-app-fwupdate/Makefile
 
           # ★ 关键补丁：bandix 的 Makefile 只为了拿 RUSTC_TARGET_ARCH（用来拼下载
           #   文件名）而 include 了 feeds/packages/lang/rust/rust-values.mk，
